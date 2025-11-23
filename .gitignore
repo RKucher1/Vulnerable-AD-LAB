@@ -1,0 +1,19 @@
+# Runtime artifacts
+setup.log
+vuln-credit-union-lab/
+
+# Vagrant/VirtualBox state
+.vagrant/
+
+# Python/Ansible caches
+__pycache__/
+*.pyc
+
+# Editor and OS files
+.vscode/
+*.swp
+.DS_Store
+
+# Local environment / build artifacts
+dist/
+build/

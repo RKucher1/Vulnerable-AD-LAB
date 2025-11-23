@@ -9,55 +9,298 @@
 #       - Full AD vulnerabilities, SMB NTLMv2 traffic generation, etc.
 #  3) Sequentially boots each VM to reduce memory spikes.
 #  4) Leaves you with an isolated, intentionally insecure domain environment.
-#
-# Requirements:
-#   - ~200-300 GB free disk space
-#   - ~32 GB RAM if using 2 GB per VM (14 total)
-#   - Ubuntu-like distro
-#
+#############################
+# 0) Ensure LAB_DIR is set and created before any file writes
+#############################
+# Set LAB_DIR to a safe default if not set
+if [ -z "$LAB_DIR" ]; then
+  LAB_DIR="vuln-credit-union-lab"
+fi
 
-set -euo pipefail
+# Basic logging and helper functions must be defined before use
+LOGFILE="$(pwd)/setup.log"
+log() { printf '%s %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*" | tee -a "$LOGFILE"; }
+log_info() { log "[INFO] $*"; }
+log_warn() { log "[WARN] $*"; }
+log_error() { log "[ERROR] $*"; }
 
-LAB_DIR="vuln-credit-union-lab"
+# Wrapper to run commands or print them in dry-run mode
+run_cmd() {
+  if [ "${DRY_RUN:-0}" -eq 1 ]; then
+    log_info "[DRY-RUN] $*"
+  else
+    log_info "RUN: $*"
+    eval "$*"
+  fi
+}
 
-# Number of Windows 11 workstations to create (default: 2)
-W11_COUNT=2
-export W11_COUNT
+# Interactive confirmation helper (rescues dry-run and auto-yes)
+ask_confirm() {
+  prompt="$1"
+  if [ "${DRY_RUN:-0}" -eq 1 ]; then
+    log_info "[DRY-RUN] Auto-confirm for: $prompt"
+    return 0
+  fi
+  if [ "${YES:-0}" -eq 1 ]; then
+    log_info "Auto-yes enabled; proceeding: $prompt"
+    return 0
+  fi
+  while true; do
+    read -rp "$prompt [y/N]: " ans
+    case "$ans" in
+      [Yy]*) return 0 ;;
+      [Nn]|"") return 1 ;;
+      *) echo "Please answer y or n." ;;
+    esac
+  done
+}
 
-# Dry-run support: set to 1 to skip actions that change the host (vagrant up, installs)
-DRY_RUN=0
-# Auto-yes to skip interactive confirmations
-YES=0
-
-# Simple CLI parsing for --dry-run and -n/--count
-while [ "$#" -gt 0 ]; do
-  case "$1" in
+# Parse arguments for advanced features
+TEARDOWN=0
+HEALTH_CHECK=0
+SUMMARY=0
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --teardown)
+      TEARDOWN=1
+      ;;
+    --health-check)
+      HEALTH_CHECK=1
+      ;;
+    --summary)
+      SUMMARY=1
+      ;;
     --dry-run)
       DRY_RUN=1
-      shift
       ;;
-    -y|--yes)
+    --yes)
       YES=1
+      ;;
+    --config)
+      CONFIG_FILE="$2"
       shift
       ;;
-    -n|--count)
-      shift
-      if [ -n "${1:-}" ]; then
-        W11_COUNT="$1"
-        export W11_COUNT
-        shift
-      fi
-      ;;
-    -*)
-      echo "[WARN] Unknown argument: $1"
-      shift
+    --force)
+      FORCE=1
       ;;
     *)
-      # positional args ignored
-      shift
+      echo "Unknown option: $1" >&2
+      exit 1
       ;;
   esac
+  shift
 done
+
+# Teardown logic
+if [ "$TEARDOWN" -eq 1 ]; then
+  echo "[!] Teardown requested. This will destroy all lab VMs and optionally remove the lab directory."
+  if ask_confirm "Are you sure you want to destroy the lab? This cannot be undone."; then
+    if [ -d "$LAB_DIR" ]; then
+      (cd "$LAB_DIR" && vagrant destroy -f)
+      if ask_confirm "Delete the entire lab directory '$LAB_DIR'?"; then
+        run_cmd "rm -rf '$LAB_DIR'"
+        echo "[*] Lab directory deleted."
+      else
+        echo "[*] Lab directory retained."
+      fi
+    else
+      echo "[WARN] Lab directory '$LAB_DIR' does not exist. Nothing to destroy."
+    fi
+  else
+    echo "[*] Teardown cancelled."
+  fi
+  exit 0
+fi
+
+# Health check logic
+if [ "$HEALTH_CHECK" -eq 1 ]; then
+  if [ -d "$LAB_DIR" ]; then
+    echo "[*] Health check: Vagrant status for all lab VMs:"
+    (cd "$LAB_DIR" && vagrant status)
+  else
+    echo "[WARN] Lab directory '$LAB_DIR' does not exist."
+  fi
+  exit 0
+fi
+
+# Summary table logic
+if [ "$SUMMARY" -eq 1 ]; then
+  echo "\n[*] Lab VM Summary Table:"
+  printf "%-16s %-12s %-18s\n" "VM Name" "Role" "IP Address"
+  printf "%-16s %-12s %-18s\n" "-------" "----" "----------"
+  [ "$DC_ENABLED" = true ] && printf "%-16s %-12s %-18s\n" "dc01" "DomainCtrl" "192.168.56.10"
+  [ "$FILESERVER_ENABLED" = true ] && printf "%-16s %-12s %-18s\n" "fs01" "FileServer" "192.168.56.11"
+  if [ "$WIN11_ENABLED" = true ] && [ "${W11_COUNT:-0}" -gt 0 ]; then
+    for i in $(seq 1 $W11_COUNT); do
+      ip=$((19 + i))
+      printf "%-16s %-12s %-18s\n" "w11-$(printf '%02d' $i)" "Win11" "192.168.56.$ip"
+    done
+  fi
+  [ "$LEGACY_ENABLED" = true ] && printf "%-16s %-12s %-18s\n" "w7-legacy" "Win7Legacy" "192.168.56.30"
+  [ "$WEBSERVER_ENABLED" = true ] && printf "%-16s %-12s %-18s\n" "web01" "WebServer" "192.168.56.40"
+  echo
+  exit 0
+fi
+# Ensure LAB_DIR is not root
+if [ "$LAB_DIR" = "/" ]; then
+  echo "[FATAL] LAB_DIR cannot be root directory!" >&2
+  exit 1
+fi
+# Handle existing LAB_DIR: prompt or allow --force
+if [ -d "$LAB_DIR" ]; then
+  if [ "${FORCE:-0}" -eq 1 ]; then
+    log_warn "'$LAB_DIR' already exists. --force specified, continuing and overwriting contents."
+    run_cmd "rm -rf '$LAB_DIR'"
+  else
+    echo "[WARN] '$LAB_DIR' already exists."
+    if ask_confirm "Delete and recreate '$LAB_DIR'? This will remove all contents."; then
+      run_cmd "rm -rf '$LAB_DIR'"
+      log_info "Deleted existing '$LAB_DIR'."
+    else
+      log_error "'$LAB_DIR' already exists. Exiting to avoid overwriting. Use --force to override."
+      exit 1
+    fi
+  fi
+fi
+mkdir -p "$LAB_DIR"
+
+#############################
+# 4A) Vagrantfile (config-driven)
+#############################
+cat > "$LAB_DIR/Vagrantfile" <<EOF
+Vagrant.configure("2") do |config|
+  config.vm.provider :virtualbox do |vb|
+    vb.gui = false
+  end
+  network_base_ip = "192.168.56"
+
+  # DC01
+  if $ENV['DC_ENABLED'] == 'true'
+    config.vm.define "dc01" do |dc|
+      dc.vm.box = "gusztavvargadr/windows-server-2019"
+      dc.vm.hostname = "dc01.creditunion.local"
+      dc.vm.network :private_network, ip: "[36m#{network_base_ip}.10[0m"
+      dc.vm.provider :virtualbox do |vb|
+        vb.memory = $ENV['DC_RAM'] ? $ENV['DC_RAM'].to_i : 2048
+        vb.cpus = $ENV['DC_CPUS'] ? $ENV['DC_CPUS'].to_i : 2
+      end
+      dc.vm.communicator = "winrm"
+      dc.winrm.username = "vagrant"
+      dc.winrm.password = "vagrant"
+      dc.winrm.transport = :plaintext
+      dc.winrm.basic_auth_only = true
+      dc.vm.provision "ansible_local" do |ansible|
+        ansible.playbook = "ansible/playbook.yml"
+        ansible.inventory_path = "ansible/inventory"
+        ansible.extra_vars = { domain_name: "creditunion.local" }
+        ansible.limit = "dc01"
+      end
+    end
+  end
+
+  # FILE SERVER
+  if $ENV['FILESERVER_ENABLED'] == 'true'
+    config.vm.define "fs01" do |fs|
+      fs.vm.box = "gusztavvargadr/windows-server-2019"
+      fs.vm.hostname = "fs01.creditunion.local"
+      fs.vm.network :private_network, ip: "#{network_base_ip}.11"
+      fs.vm.provider :virtualbox do |vb|
+        vb.memory = $ENV['FILESERVER_RAM'] ? $ENV['FILESERVER_RAM'].to_i : 2048
+        vb.cpus = $ENV['FILESERVER_CPUS'] ? $ENV['FILESERVER_CPUS'].to_i : 2
+      end
+      fs.vm.communicator = "winrm"
+      fs.winrm.username = "vagrant"
+      fs.winrm.password = "vagrant"
+      fs.winrm.transport = :plaintext
+      fs.winrm.basic_auth_only = true
+      fs.vm.provision "ansible_local" do |ansible|
+        ansible.playbook = "ansible/playbook.yml"
+        ansible.inventory_path = "ansible/inventory"
+        ansible.extra_vars = { domain_name: "creditunion.local" }
+        ansible.limit = "fs01"
+      end
+    end
+  end
+
+  # Windows 11 workstations
+  if $ENV['WIN11_ENABLED'] == 'true'
+    w11_count = $ENV['W11_COUNT'] ? $ENV['W11_COUNT'].to_i : 2
+    (1..w11_count).each do |i|
+      w11_name = "w11-#{format('%02d', i)}"
+      w11_ip = 19 + i
+      config.vm.define w11_name do |win11|
+        win11.vm.box = "gusztavvargadr/windows-11"
+        win11.vm.hostname = "#{w11_name}.creditunion.local"
+        win11.vm.network :private_network, ip: "#{network_base_ip}.#{w11_ip}"
+        win11.vm.provider :virtualbox do |vb|
+          vb.memory = $ENV['WIN11_RAM'] ? $ENV['WIN11_RAM'].to_i : 2048
+          vb.cpus = $ENV['WIN11_CPUS'] ? $ENV['WIN11_CPUS'].to_i : 2
+        end
+        win11.vm.communicator = "winrm"
+        win11.winrm.username = "vagrant"
+        win11.winrm.password = "vagrant"
+        win11.winrm.transport = :plaintext
+        win11.winrm.basic_auth_only = true
+        win11.vm.provision "ansible_local" do |ansible|
+          ansible.playbook = "ansible/playbook.yml"
+          ansible.inventory_path = "ansible/inventory"
+          ansible.extra_vars = { domain_name: "creditunion.local" }
+          ansible.limit = w11_name
+        end
+      end
+    end
+  end
+
+  # WINDOWS 7 LEGACY
+  if $ENV['LEGACY_ENABLED'] == 'true'
+    config.vm.define "w7-legacy" do |w7|
+      w7.vm.box = "opensky/windows-7-professional-sp1-x64"
+      w7.vm.hostname = "w7-legacy.creditunion.local"
+      w7.vm.network :private_network, ip: "#{network_base_ip}.30"
+      w7.vm.provider :virtualbox do |vb|
+        vb.memory = $ENV['LEGACY_RAM'] ? $ENV['LEGACY_RAM'].to_i : 2048
+        vb.cpus = $ENV['LEGACY_CPUS'] ? $ENV['LEGACY_CPUS'].to_i : 2
+      end
+      w7.vm.communicator = "winrm"
+      w7.winrm.username = "vagrant"
+      w7.winrm.password = "vagrant"
+      w7.winrm.transport = :plaintext
+      w7.winrm.basic_auth_only = true
+      w7.vm.provision "ansible_local" do |ansible|
+        ansible.playbook = "ansible/playbook.yml"
+        ansible.inventory_path = "ansible/inventory"
+        ansible.extra_vars = { domain_name: "creditunion.local" }
+        ansible.limit = "w7-legacy"
+      end
+    end
+  end
+
+  # WEB SERVER
+  if $ENV['WEBSERVER_ENABLED'] == 'true'
+    config.vm.define "web01" do |web|
+      web.vm.box = "gusztavvargadr/windows-server-2019"
+      web.vm.hostname = "web01.creditunion.local"
+      web.vm.network :private_network, ip: "#{network_base_ip}.40"
+      web.vm.provider :virtualbox do |vb|
+        vb.memory = $ENV['WEBSERVER_RAM'] ? $ENV['WEBSERVER_RAM'].to_i : 2048
+        vb.cpus = $ENV['WEBSERVER_CPUS'] ? $ENV['WEBSERVER_CPUS'].to_i : 2
+      end
+      web.vm.communicator = "winrm"
+      web.winrm.username = "vagrant"
+      web.winrm.password = "vagrant"
+      web.winrm.transport = :plaintext
+      web.winrm.basic_auth_only = true
+      web.vm.provision "ansible_local" do |ansible|
+        ansible.playbook = "ansible/playbook.yml"
+        ansible.inventory_path = "ansible/inventory"
+        ansible.extra_vars = { domain_name: "creditunion.local" }
+        ansible.limit = "web01"
+      end
+    end
+  end
+end
+EOF
+
 
 # Basic logging helpers
 LOGFILE="$(pwd)/setup.log"
@@ -76,7 +319,7 @@ trap 'on_error $LINENO' ERR
 
 # Wrapper to run commands or print them in dry-run mode
 run_cmd() {
-  if [ "$DRY_RUN" -eq 1 ]; then
+  if [ "${DRY_RUN:-0}" -eq 1 ]; then
     log_info "[DRY-RUN] $*"
   else
     log_info "RUN: $*"
@@ -84,17 +327,22 @@ run_cmd() {
   fi
 }
 
+
 # Validate W11_COUNT is numeric and in a reasonable range
 validate_w11_count() {
+  # Set default if unset
+  if [ -z "$W11_COUNT" ]; then
+    W11_COUNT=2
+  fi
   if ! printf '%s' "$W11_COUNT" | grep -Eq '^[0-9]+$'; then
     log_error "W11_COUNT must be a positive integer. Got: '$W11_COUNT'"
     exit 2
   fi
-  if [ "$W11_COUNT" -lt 1 ]; then
+  if [ "${W11_COUNT:-0}" -lt 1 ]; then
     log_warn "W11_COUNT < 1; setting to 1"
     W11_COUNT=1
   fi
-  if [ "$W11_COUNT" -gt 20 ]; then
+  if [ "${W11_COUNT:-0}" -gt 20 ]; then
     log_warn "W11_COUNT > 20; capping to 20"
     W11_COUNT=20
   fi
@@ -106,7 +354,7 @@ preflight_checks() {
   # Check disk (GB)
   req_disk_gb=50
   avail_gb=$(df --output=avail -BG . | tail -1 | tr -dc '0-9') || avail_gb=0
-  if [ -n "$avail_gb" ] && [ "$avail_gb" -lt "$req_disk_gb" ]; then
+  if [ -n "$avail_gb" ] && [ "${avail_gb:-0}" -lt "${req_disk_gb:-0}" ]; then
     log_warn "Available disk (${avail_gb}GB) is less than recommended ${req_disk_gb}GB"
   else
     log_info "Disk check OK: ${avail_gb}GB available"
@@ -117,7 +365,7 @@ preflight_checks() {
   if [ -r /proc/meminfo ]; then
     mem_kb=$(awk '/MemTotal:/ {print $2}' /proc/meminfo)
     mem_gb=$(( mem_kb / 1024 / 1024 ))
-    if [ "$mem_gb" -lt "$req_ram_gb" ]; then
+    if [ "${mem_gb:-0}" -lt "${req_ram_gb:-0}" ]; then
       log_warn "System RAM (${mem_gb}GB) is less than recommended ${req_ram_gb}GB"
     else
       log_info "RAM check OK: ${mem_gb}GB available"
@@ -153,11 +401,11 @@ check_apt
 # Interactive confirmation helper (rescues dry-run and auto-yes)
 ask_confirm() {
   prompt="$1"
-  if [ "$DRY_RUN" -eq 1 ]; then
+  if [ "${DRY_RUN:-0}" -eq 1 ]; then
     log_info "[DRY-RUN] Auto-confirm for: $prompt"
     return 0
   fi
-  if [ "$YES" -eq 1 ]; then
+  if [ "${YES:-0}" -eq 1 ]; then
     log_info "Auto-yes enabled; proceeding: $prompt"
     return 0
   fi
@@ -188,45 +436,54 @@ else
   echo "[WARNING] Could not detect OS. Proceeding as if Ubuntu-like."
 fi
 
+
 log_info "Updating apt and ensuring apt-utils, curl, wget present..."
-if ask_confirm "Proceed to update apt and install apt-utils, curl, wget? This will use sudo."; then
-  run_cmd "sudo apt-get update -y"
-  run_cmd "sudo apt-get install -y apt-utils curl wget"
+if [ "${DRY_RUN:-0}" -eq 1 ]; then
+  log_info "[DRY-RUN] Would update apt and install apt-utils, curl, wget."
 else
-  log_warn "Skipping apt update/install per user choice"
+  if ask_confirm "Proceed to update apt and install apt-utils, curl, wget? This will use sudo."; then
+    run_cmd "sudo apt-get update -y"
+    run_cmd "sudo apt-get install -y apt-utils curl wget"
+  else
+    log_warn "Skipping apt update/install per user choice"
+  fi
 fi
 
-if ! command -v virtualbox &> /dev/null; then
-  log_warn "VirtualBox not found."
-  if ask_confirm "Install VirtualBox now? This will use sudo and download packages."; then
-    run_cmd "sudo apt-get install -y virtualbox"
-  else
-    log_warn "Skipping VirtualBox install per user choice"
-  fi
+if [ "${DRY_RUN:-0}" -eq 1 ]; then
+  log_info "[DRY-RUN] Would check/install VirtualBox, Vagrant, Ansible."
 else
-  log_info "VirtualBox already installed."
-fi
+  if ! command -v virtualbox &> /dev/null; then
+    log_warn "VirtualBox not found."
+    if ask_confirm "Install VirtualBox now? This will use sudo and download packages."; then
+      run_cmd "sudo apt-get install -y virtualbox"
+    else
+      log_warn "Skipping VirtualBox install per user choice"
+    fi
+  else
+    log_info "VirtualBox already installed."
+  fi
 
-if ! command -v vagrant &> /dev/null; then
-  log_warn "Vagrant not found."
-  if ask_confirm "Install Vagrant now? This will use sudo and download packages."; then
-    run_cmd "sudo apt-get install -y vagrant"
+  if ! command -v vagrant &> /dev/null; then
+    log_warn "Vagrant not found."
+    if ask_confirm "Install Vagrant now? This will use sudo and download packages."; then
+      run_cmd "sudo apt-get install -y vagrant"
+    else
+      log_warn "Skipping Vagrant install per user choice"
+    fi
   else
-    log_warn "Skipping Vagrant install per user choice"
+    log_info "Vagrant already installed."
   fi
-else
-  log_info "Vagrant already installed."
-fi
 
-if ! command -v ansible &> /dev/null; then
-  log_warn "Ansible not found."
-  if ask_confirm "Install Ansible now? This will use sudo and download packages."; then
-    run_cmd "sudo apt-get install -y ansible"
+  if ! command -v ansible &> /dev/null; then
+    log_warn "Ansible not found."
+    if ask_confirm "Install Ansible now? This will use sudo and download packages."; then
+      run_cmd "sudo apt-get install -y ansible"
+    else
+      log_warn "Skipping Ansible install per user choice"
+    fi
   else
-    log_warn "Skipping Ansible install per user choice"
+    log_info "Ansible already installed."
   fi
-else
-  log_info "Ansible already installed."
 fi
 echo "========== (1/6) OS/Dependency Check Complete =========="
 
@@ -251,19 +508,23 @@ for box in "${REQUIRED_BOXES[@]}"; do
   fi
 done
 
-if [ "${need_add:-0}" -eq 1 ]; then
-  if ask_confirm "Some Vagrant boxes are missing. Add missing boxes now? This can download several GB."; then
-    for box in "${REQUIRED_BOXES[@]}"; do
-      if ! vagrant box list | grep -q "$box"; then
-        log_info "Adding box: $box"
-        run_cmd "vagrant box add '$box' --provider virtualbox"
-      fi
-    done
-  else
-    log_warn "Skipping adding missing Vagrant boxes per user choice"
-  fi
+if [ "${DRY_RUN:-0}" -eq 1 ]; then
+  log_info "[DRY-RUN] Would check/add Vagrant boxes: ${REQUIRED_BOXES[*]}"
 else
-  log_info "All required Vagrant boxes present"
+  if [ "${need_add:-0}" -eq 1 ]; then  # already safe, but keep for clarity
+    if ask_confirm "Some Vagrant boxes are missing. Add missing boxes now? This can download several GB."; then
+      for box in "${REQUIRED_BOXES[@]}"; do
+        if ! vagrant box list | grep -q "$box"; then
+          log_info "Adding box: $box"
+          run_cmd "vagrant box add '$box' --provider virtualbox"
+        fi
+      done
+    else
+      log_warn "Skipping adding missing Vagrant boxes per user choice"
+    fi
+  else
+    log_info "All required Vagrant boxes present"
+  fi
 fi
 echo "=== [2/6] Checking/Adding Vagrant Boxes (done) ==="
 
@@ -271,13 +532,16 @@ echo "=== [2/6] Checking/Adding Vagrant Boxes (done) ==="
 # 3) Create 'vuln-credit-union-lab' folder if not existing
 ###############################################################################
 echo "=== [3/6] Creating Lab Folder/Files (start) ==="
-if [ -d "$LAB_DIR" ]; then
-  log_error "'$LAB_DIR' already exists. Exiting to avoid overwriting."
-  exit 1
+if [ "${DRY_RUN:-0}" -eq 1 ]; then
+  if [ -d "$LAB_DIR" ]; then
+    log_info "[DRY-RUN] Directory '$LAB_DIR' already exists; skipping actual filesystem changes."
+  else
+    log_info "[DRY-RUN] Would create directory '$LAB_DIR' and write Vagrant/Ansible files."
+  fi
+else
+  mkdir -p "$LAB_DIR"
+  log_info "Created directory '$LAB_DIR'. Writing Vagrant and Ansible files..."
 fi
-
-mkdir -p "$LAB_DIR"
-log_info "Created directory '$LAB_DIR'. Writing Vagrant and Ansible files..."
 echo "=== [3/6] Creating Lab Folder/Files (done) ==="
 ###############################################################################
 # 4) Write Vagrantfile + Ansible structure + full PowerShell scripts
@@ -287,6 +551,9 @@ echo "=== [3/6] Creating Lab Folder/Files (done) ==="
 # 4A) Vagrantfile
 #############################
 echo "=== [4/6] Writing Vagrant + Ansible config (start) ==="
+if [ "${DRY_RUN:-0}" -eq 1 ]; then
+  log_info "[DRY-RUN] Would write Vagrantfile and Ansible configuration into '$LAB_DIR'"
+else
 cat <<'EOF' > "$LAB_DIR/Vagrantfile"
 Vagrant.configure("2") do |config|
   config.vm.provider :virtualbox do |vb|
@@ -406,35 +673,51 @@ Vagrant.configure("2") do |config|
 end
 EOF
 
-#############################
-# 4B) Ansible inventory
-#############################
-mkdir -p "$LAB_DIR/ansible"
-cat <<'EOF' > "$LAB_DIR/ansible/inventory"
-[dc]
 dc01 ansible_host=192.168.56.10 ansible_user=vagrant ansible_password=vagrant ansible_port=5985 ansible_connection=winrm ansible_winrm_server_cert_validation=ignore
 
-[fileservers]
 fs01 ansible_host=192.168.56.11 ansible_user=vagrant ansible_password=vagrant ansible_port=5985 ansible_connection=winrm ansible_winrm_server_cert_validation=ignore
 
-[win11workstations]
-EOF
-
-for i in $(seq 1 $W11_COUNT); do
-  ip=$((19 + i))
-  printf "w11-%02d ansible_host=192.168.56.%d ansible_user=vagrant ansible_password=vagrant ansible_port=5985 ansible_connection=winrm ansible_winrm_server_cert_validation=ignore\n" "$i" "$ip" >> "$LAB_DIR/ansible/inventory"
-done
-
-cat <<'EOF' >> "$LAB_DIR/ansible/inventory"
-[legacy]
 w7-legacy ansible_host=192.168.56.30 ansible_user=vagrant ansible_password=vagrant ansible_port=5985 ansible_connection=winrm ansible_winrm_server_cert_validation=ignore
 
-[webserver]
 web01 ansible_host=192.168.56.40 ansible_user=vagrant ansible_password=vagrant ansible_port=5985 ansible_connection=winrm ansible_winrm_server_cert_validation=ignore
 
-[all:vars]
 ansible_python_interpreter=/usr/bin/python3
-EOF
+#############################
+# 4B) Ansible inventory (config-driven)
+#############################
+mkdir -p "$LAB_DIR/ansible"
+{
+  if [ "$DC_ENABLED" = true ]; then
+    echo "[dc]"
+    echo "dc01 ansible_host=192.168.56.10 ansible_user=vagrant ansible_password=vagrant ansible_port=5985 ansible_connection=winrm ansible_winrm_server_cert_validation=ignore"
+    echo
+  fi
+  if [ "$FILESERVER_ENABLED" = true ]; then
+    echo "[fileservers]"
+    echo "fs01 ansible_host=192.168.56.11 ansible_user=vagrant ansible_password=vagrant ansible_port=5985 ansible_connection=winrm ansible_winrm_server_cert_validation=ignore"
+    echo
+  fi
+  if [ "$WIN11_ENABLED" = true ] && [ "${W11_COUNT:-0}" -gt 0 ]; then
+    echo "[win11workstations]"
+    for i in $(seq 1 $W11_COUNT); do
+      ip=$((19 + i))
+      printf "w11-%02d ansible_host=192.168.56.%d ansible_user=vagrant ansible_password=vagrant ansible_port=5985 ansible_connection=winrm ansible_winrm_server_cert_validation=ignore\n" "$i" "$ip"
+    done
+    echo
+  fi
+  if [ "$LEGACY_ENABLED" = true ]; then
+    echo "[legacy]"
+    echo "w7-legacy ansible_host=192.168.56.30 ansible_user=vagrant ansible_password=vagrant ansible_port=5985 ansible_connection=winrm ansible_winrm_server_cert_validation=ignore"
+    echo
+  fi
+  if [ "$WEBSERVER_ENABLED" = true ]; then
+    echo "[webserver]"
+    echo "web01 ansible_host=192.168.56.40 ansible_user=vagrant ansible_password=vagrant ansible_port=5985 ansible_connection=winrm ansible_winrm_server_cert_validation=ignore"
+    echo
+  fi
+  echo "[all:vars]"
+  echo "ansible_python_interpreter=/usr/bin/python3"
+} > "$LAB_DIR/ansible/inventory"
 
 #############################
 # 4C) Ansible playbook
@@ -1283,6 +1566,7 @@ Write-Log "Web server configuration complete." "SUCCESS"
 EOF
 
 echo "[*] Finished writing all configuration files."
+fi
 echo "=== [4/6] Writing Vagrant + Ansible config (done) ==="
 ###############################################################################
 # 5) Spin up machines in sequence
@@ -1296,23 +1580,36 @@ else
   exit 0
 fi
 
-echo "==> Starting dc01 (Domain Controller)..."
-run_cmd "vagrant up dc01"
-
 echo "==> Starting fs01 (File Server)..."
-run_cmd "vagrant up fs01"
-
-for i in $(seq 1 $W11_COUNT); do
-  VM_NAME="w11-$(printf '%02d' $i)"
-  echo "==> Starting $VM_NAME (Windows 11)..."
-  run_cmd "vagrant up '$VM_NAME'"
-done
-
 echo "==> Starting w7-legacy (Windows 7)..."
-run_cmd "vagrant up w7-legacy"
-
 echo "==> Starting web01 (Web Server)..."
-run_cmd "vagrant up web01"
+if [ "$DC_ENABLED" = true ]; then
+  echo "==> Starting dc01 (Domain Controller)..."
+  run_cmd "vagrant up dc01"
+fi
+
+if [ "$FILESERVER_ENABLED" = true ]; then
+  echo "==> Starting fs01 (File Server)..."
+  run_cmd "vagrant up fs01"
+fi
+
+if [ "$WIN11_ENABLED" = true ] && [ "${W11_COUNT:-0}" -gt 0 ]; then
+  for i in $(seq 1 $W11_COUNT); do
+    VM_NAME="w11-$(printf '%02d' $i)"
+    echo "==> Starting $VM_NAME (Windows 11)..."
+    run_cmd "vagrant up '$VM_NAME'"
+  done
+fi
+
+if [ "$LEGACY_ENABLED" = true ]; then
+  echo "==> Starting w7-legacy (Windows 7)..."
+  run_cmd "vagrant up w7-legacy"
+fi
+
+if [ "$WEBSERVER_ENABLED" = true ]; then
+  echo "==> Starting web01 (Web Server)..."
+  run_cmd "vagrant up web01"
+fi
 echo "=== [5/6] Spinning up VMs in sequence (done) ==="
 #######################################
 # STAGE 6: COMPLETION

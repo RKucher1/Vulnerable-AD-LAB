@@ -14,6 +14,18 @@ chmod +x setup.sh
 **Sanity check performed**
 - You can run `bash -n setup.sh` to do a basic shell syntax check. I also corrected a mismatch so the generated `Vagrantfile` uses the same Windows 11 box that the script pre-checks (`gusztavvargadr/windows-11`).
 
+**New / Important behavior (updated)**
+- The script now supports several command-line flags to control behavior without changing the script contents:
+	- `--dry-run`: preview the full flow without performing downloads, filesystem writes, package installs, or VM operations. This is a true no-op for side-effects and useful for validating the control flow.
+	- `--force`: non-interactively overwrite an existing `vuln-credit-union-lab/` directory when the script would otherwise prompt.
+	- `--yes`: auto-answer interactive confirmations the script would normally prompt for.
+	- `--teardown`: destroy the Vagrant VMs in the lab (prompts for confirmation unless `--force` is used).
+	- `--health-check`: show `vagrant status` for the lab VMs (no changes).
+	- `--summary`: print a concise summary table of expected VMs and addresses.
+
+- Helper functions for logging and confirmations were moved earlier in the script so they are available during preflight checks. That fixed an error where `ask_confirm` and logging helpers could be called before being defined.
+- The script no longer unconditionally aborts when `vuln-credit-union-lab/` exists; it will prompt to delete/recreate, honor `--force`, and in `--dry-run` simply log the intended action without removing anything.
+
 **How to change how many computers are created**
 The script currently generates 10 Windows 11 workstations. Because the script writes both the `Vagrantfile` and a static `ansible/inventory`, you must keep those two parts consistent when you change the count.
 
@@ -41,7 +53,7 @@ If you'd like, I can implement the `W11_COUNT` variable and update `setup.sh` so
 
 **Safety notes**
 - This environment is intentionally insecure for training. Do not attach it to production or public networks.
-- The script aborts if `vuln-credit-union-lab/` already exists to avoid accidental overwrites. Remove or move the directory if you want to re-run.
+- The script will prompt before overwriting `vuln-credit-union-lab/` or you can pass `--force` to override. Use `--dry-run` to preview what would happen without any destructive or network actions.
 
 **Next steps I can take**
 - Parameterize `setup.sh` with `W11_COUNT` and make inventory generation match (I can implement this and push the change).

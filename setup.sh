@@ -26,12 +26,18 @@ export W11_COUNT
 
 # Dry-run support: set to 1 to skip actions that change the host (vagrant up, installs)
 DRY_RUN=0
+# Auto-yes to skip interactive confirmations
+YES=0
 
 # Simple CLI parsing for --dry-run and -n/--count
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --dry-run)
       DRY_RUN=1
+      shift
+      ;;
+    -y|--yes)
+      YES=1
       shift
       ;;
     -n|--count)
@@ -42,8 +48,12 @@ while [ "$#" -gt 0 ]; do
         shift
       fi
       ;;
-    *)
+    -*)
       echo "[WARN] Unknown argument: $1"
+      shift
+      ;;
+    *)
+      # positional args ignored
       shift
       ;;
   esac
@@ -120,6 +130,47 @@ preflight_checks() {
 validate_w11_count
 preflight_checks
 
+# Additional checks: virtualization support and apt availability
+virtualization_check() {
+  if grep -E --color=never -q 'vmx|svm' /proc/cpuinfo 2>/dev/null; then
+    log_info "CPU virtualization extensions detected (vmx/svm)"
+  else
+    log_warn "No CPU virtualization flags (vmx/svm) detected — VirtualBox may fail on this host"
+  fi
+}
+
+check_apt() {
+  if ! command -v apt-get &> /dev/null; then
+    log_warn "apt-get not found. This script assumes an Ubuntu-like system with apt-get. Installs will likely fail."
+  else
+    log_info "apt-get is available"
+  fi
+}
+
+virtualization_check
+check_apt
+
+# Interactive confirmation helper (rescues dry-run and auto-yes)
+ask_confirm() {
+  prompt="$1"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log_info "[DRY-RUN] Auto-confirm for: $prompt"
+    return 0
+  fi
+  if [ "$YES" -eq 1 ]; then
+    log_info "Auto-yes enabled; proceeding: $prompt"
+    return 0
+  fi
+  while true; do
+    read -rp "$prompt [y/N]: " ans
+    case "$ans" in
+      [Yy]*) return 0 ;;
+      [Nn]|"") return 1 ;;
+      *) echo "Please answer y or n." ;;
+    esac
+  done
+}
+
 echo "================================================================="
 echo " Setting up 'credit union' lab in '$LAB_DIR' - Full code version."
 echo "================================================================="
@@ -138,26 +189,42 @@ else
 fi
 
 log_info "Updating apt and ensuring apt-utils, curl, wget present..."
-run_cmd "sudo apt-get update -y"
-run_cmd "sudo apt-get install -y apt-utils curl wget"
+if ask_confirm "Proceed to update apt and install apt-utils, curl, wget? This will use sudo."; then
+  run_cmd "sudo apt-get update -y"
+  run_cmd "sudo apt-get install -y apt-utils curl wget"
+else
+  log_warn "Skipping apt update/install per user choice"
+fi
 
 if ! command -v virtualbox &> /dev/null; then
-  log_warn "VirtualBox not found. Installing VirtualBox..."
-  run_cmd "sudo apt-get install -y virtualbox"
+  log_warn "VirtualBox not found."
+  if ask_confirm "Install VirtualBox now? This will use sudo and download packages."; then
+    run_cmd "sudo apt-get install -y virtualbox"
+  else
+    log_warn "Skipping VirtualBox install per user choice"
+  fi
 else
   log_info "VirtualBox already installed."
 fi
 
 if ! command -v vagrant &> /dev/null; then
-  log_warn "Vagrant not found. Installing Vagrant..."
-  run_cmd "sudo apt-get install -y vagrant"
+  log_warn "Vagrant not found."
+  if ask_confirm "Install Vagrant now? This will use sudo and download packages."; then
+    run_cmd "sudo apt-get install -y vagrant"
+  else
+    log_warn "Skipping Vagrant install per user choice"
+  fi
 else
   log_info "Vagrant already installed."
 fi
 
 if ! command -v ansible &> /dev/null; then
-  log_warn "Ansible not found. Installing Ansible..."
-  run_cmd "sudo apt-get install -y ansible"
+  log_warn "Ansible not found."
+  if ask_confirm "Install Ansible now? This will use sudo and download packages."; then
+    run_cmd "sudo apt-get install -y ansible"
+  else
+    log_warn "Skipping Ansible install per user choice"
+  fi
 else
   log_info "Ansible already installed."
 fi
@@ -174,14 +241,30 @@ declare -a REQUIRED_BOXES=(
   "opensky/windows-7-professional-sp1-x64"
 )
 echo "[*] Checking required Windows base boxes..."
+need_add=0
 for box in "${REQUIRED_BOXES[@]}"; do
   if vagrant box list | grep -q "$box"; then
     echo "   - Found '$box'"
   else
-    log_info "   - Box '$box' not found, adding..."
-    run_cmd "vagrant box add '$box' --provider virtualbox"
+    echo "   - Missing: '$box'"
+    need_add=1
   fi
 done
+
+if [ "${need_add:-0}" -eq 1 ]; then
+  if ask_confirm "Some Vagrant boxes are missing. Add missing boxes now? This can download several GB."; then
+    for box in "${REQUIRED_BOXES[@]}"; do
+      if ! vagrant box list | grep -q "$box"; then
+        log_info "Adding box: $box"
+        run_cmd "vagrant box add '$box' --provider virtualbox"
+      fi
+    done
+  else
+    log_warn "Skipping adding missing Vagrant boxes per user choice"
+  fi
+else
+  log_info "All required Vagrant boxes present"
+fi
 echo "=== [2/6] Checking/Adding Vagrant Boxes (done) ==="
 
 ###############################################################################
@@ -1205,8 +1288,13 @@ echo "=== [4/6] Writing Vagrant + Ansible config (done) ==="
 # 5) Spin up machines in sequence
 ###############################################################################
 echo "=== [5/6] Spinning up VMs in sequence (done) ==="
-cd "$LAB_DIR"
-echo "[*] Now in $(pwd). Bringing up each VM in order..."
+if ask_confirm "Start bringing up VMs now? This will consume significant CPU/RAM and may download boxes."; then
+  cd "$LAB_DIR"
+  echo "[*] Now in $(pwd). Bringing up each VM in order..."
+else
+  log_warn "User declined to start VMs. You can run 'bash setup.sh' later or use --dry-run to preview actions."
+  exit 0
+fi
 
 echo "==> Starting dc01 (Domain Controller)..."
 run_cmd "vagrant up dc01"

@@ -34,6 +34,18 @@ run_cmd() {
   fi
 }
 
+
+
+
+# Error trap: report failing line and exit
+on_error() {
+  rc=$?
+  log_error "Script failed at line $1 (exit code $rc). Last command: '${BASH_COMMAND:-unknown}'"
+  log_error "See $LOGFILE for details. Exiting."
+  exit $rc
+}
+trap 'on_error $LINENO' ERR
+
 # Interactive confirmation helper (rescues dry-run and auto-yes)
 ask_confirm() {
   prompt="$1"
@@ -302,30 +314,7 @@ end
 EOF
 
 
-# Basic logging helpers
-LOGFILE="$(pwd)/setup.log"
-log() { printf '%s %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*" | tee -a "$LOGFILE"; }
-log_info() { log "[INFO] $*"; }
-log_warn() { log "[WARN] $*"; }
-log_error() { log "[ERROR] $*"; }
-
-on_error() {
-  rc=$?
-  log_error "Script failed at line $1 (exit code $rc). Last command: '${BASH_COMMAND:-unknown}'"
-  log_error "See $LOGFILE for details. Exiting."
-  exit $rc
-}
-trap 'on_error $LINENO' ERR
-
-# Wrapper to run commands or print them in dry-run mode
-run_cmd() {
-  if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    log_info "[DRY-RUN] $*"
-  else
-    log_info "RUN: $*"
-    eval "$*"
-  fi
-}
+# (logging, run_cmd and ask_confirm are defined earlier)
 
 
 # Validate W11_COUNT is numeric and in a reasonable range
@@ -397,27 +386,6 @@ check_apt() {
 
 virtualization_check
 check_apt
-
-# Interactive confirmation helper (rescues dry-run and auto-yes)
-ask_confirm() {
-  prompt="$1"
-  if [ "${DRY_RUN:-0}" -eq 1 ]; then
-    log_info "[DRY-RUN] Auto-confirm for: $prompt"
-    return 0
-  fi
-  if [ "${YES:-0}" -eq 1 ]; then
-    log_info "Auto-yes enabled; proceeding: $prompt"
-    return 0
-  fi
-  while true; do
-    read -rp "$prompt [y/N]: " ans
-    case "$ans" in
-      [Yy]*) return 0 ;;
-      [Nn]|"") return 1 ;;
-      *) echo "Please answer y or n." ;;
-    esac
-  done
-}
 
 echo "================================================================="
 echo " Setting up 'credit union' lab in '$LAB_DIR' - Full code version."

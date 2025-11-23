@@ -20,6 +20,10 @@ set -e
 
 LAB_DIR="vuln-credit-union-lab"
 
+# Number of Windows 11 workstations to create (default: 2)
+W11_COUNT=2
+export W11_COUNT
+
 echo "================================================================="
 echo " Setting up 'credit union' lab in '$LAB_DIR' - Full code version."
 echo "================================================================="
@@ -154,10 +158,12 @@ Vagrant.configure("2") do |config|
     end
   end
 
-  # 10 x Windows 11
-  (1..10).each do |i|
+  # Windows 11 workstations (count controlled via ENV['W11_COUNT'], default 10)
+  w11_count = ENV['W11_COUNT'] ? ENV['W11_COUNT'].to_i : 10
+
+  (1..w11_count).each do |i|
     w11_name = "w11-#{format('%02d', i)}"
-    w11_ip = 19 + i  # 192.168.56.20..29
+    w11_ip = 19 + i  # 192.168.56.20..
 
     config.vm.define w11_name do |win11|
       win11.vm.box = "gusztavvargadr/windows-11"
@@ -233,17 +239,14 @@ dc01 ansible_host=192.168.56.10 ansible_user=vagrant ansible_password=vagrant an
 fs01 ansible_host=192.168.56.11 ansible_user=vagrant ansible_password=vagrant ansible_port=5985 ansible_connection=winrm ansible_winrm_server_cert_validation=ignore
 
 [win11workstations]
-w11-01 ansible_host=192.168.56.20 ansible_user=vagrant ansible_password=vagrant ansible_port=5985 ansible_connection=winrm ansible_winrm_server_cert_validation=ignore
-w11-02 ansible_host=192.168.56.21 ansible_user=vagrant ansible_password=vagrant ansible_port=5985 ansible_connection=winrm ansible_winrm_server_cert_validation=ignore
-w11-03 ansible_host=192.168.56.22 ansible_user=vagrant ansible_password=vagrant ansible_port=5985 ansible_connection=winrm ansible_winrm_server_cert_validation=ignore
-w11-04 ansible_host=192.168.56.23 ansible_user=vagrant ansible_password=vagrant ansible_port=5985 ansible_connection=winrm ansible_winrm_server_cert_validation=ignore
-w11-05 ansible_host=192.168.56.24 ansible_user=vagrant ansible_password=vagrant ansible_port=5985 ansible_connection=winrm ansible_winrm_server_cert_validation=ignore
-w11-06 ansible_host=192.168.56.25 ansible_user=vagrant ansible_password=vagrant ansible_port=5985 ansible_connection=winrm ansible_winrm_server_cert_validation=ignore
-w11-07 ansible_host=192.168.56.26 ansible_user=vagrant ansible_password=vagrant ansible_port=5985 ansible_connection=winrm ansible_winrm_server_cert_validation=ignore
-w11-08 ansible_host=192.168.56.27 ansible_user=vagrant ansible_password=vagrant ansible_port=5985 ansible_connection=winrm ansible_winrm_server_cert_validation=ignore
-w11-09 ansible_host=192.168.56.28 ansible_user=vagrant ansible_password=vagrant ansible_port=5985 ansible_connection=winrm ansible_winrm_server_cert_validation=ignore
-w11-10 ansible_host=192.168.56.29 ansible_user=vagrant ansible_password=vagrant ansible_port=5985 ansible_connection=winrm ansible_winrm_server_cert_validation=ignore
+EOF
 
+for i in $(seq 1 $W11_COUNT); do
+  ip=$((19 + i))
+  printf "w11-%02d ansible_host=192.168.56.%d ansible_user=vagrant ansible_password=vagrant ansible_port=5985 ansible_connection=winrm ansible_winrm_server_cert_validation=ignore\n" "$i" "$ip" >> "$LAB_DIR/ansible/inventory"
+done
+
+cat <<'EOF' >> "$LAB_DIR/ansible/inventory"
 [legacy]
 w7-legacy ansible_host=192.168.56.30 ansible_user=vagrant ansible_password=vagrant ansible_port=5985 ansible_connection=winrm ansible_winrm_server_cert_validation=ignore
 
@@ -1115,7 +1118,7 @@ vagrant up dc01
 echo "==> Starting fs01 (File Server)..."
 vagrant up fs01
 
-for i in {1..10}; do
+for i in $(seq 1 $W11_COUNT); do
   VM_NAME="w11-$(printf '%02d' $i)"
   echo "==> Starting $VM_NAME (Windows 11)..."
   vagrant up "$VM_NAME"

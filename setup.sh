@@ -5,7 +5,7 @@
 # This single script:
 #  1) Installs VirtualBox, Vagrant, Ansible if missing (Ubuntu-like OS).
 #  2) Creates a multi-VM lab in 'vuln-credit-union-lab/':
-#       - DC (promoted from scratch), File Server, 10 Windows 11, 1 Win7 Legacy, 1 Web Server
+#       - DC (promoted from scratch), File Server, Windows 11 workstations (count configurable via W11_COUNT), 1 Win7 Legacy, 1 Web Server
 #       - Full AD vulnerabilities, SMB NTLMv2 traffic generation, etc.
 #  3) Sequentially boots each VM to reduce memory spikes.
 #  4) Leaves you with an isolated, intentionally insecure domain environment.
@@ -1135,6 +1135,6 @@ echo "=== [5/6] Spinning up VMs in sequence (done) ==="
 #######################################
 echo "[*] All machines have been provisioned sequentially."
 echo "[*] The 'credit union' lab is now up and running."
-echo "[*] Summary: Domain Controller, File Server, 10 Win11, 1 Win7, 1 WebServer."
+echo "[*] Summary: Domain Controller, File Server, ${W11_COUNT} Win11, 1 Win7, 1 WebServer."
 echo "    Vulnerable AD config applied; Win11 sends periodic NTLMv2 SMB traffic."
 echo "=== [6/6] Lab environment is fully ready. ==="

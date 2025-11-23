@@ -160,7 +160,7 @@ Vagrant.configure("2") do |config|
     w11_ip = 19 + i  # 192.168.56.20..29
 
     config.vm.define w11_name do |win11|
-      win11.vm.box = "YourOrg/windows-11"
+      win11.vm.box = "gusztavvargadr/windows-11"
       win11.vm.hostname = "#{w11_name}.creditunion.local"
       win11.vm.network :private_network, ip: "#{network_base_ip}.#{w11_ip}"
 

@@ -16,13 +16,109 @@
 #   - Ubuntu-like distro
 #
 
-set -e
+set -euo pipefail
 
 LAB_DIR="vuln-credit-union-lab"
 
 # Number of Windows 11 workstations to create (default: 2)
 W11_COUNT=2
 export W11_COUNT
+
+# Dry-run support: set to 1 to skip actions that change the host (vagrant up, installs)
+DRY_RUN=0
+
+# Simple CLI parsing for --dry-run and -n/--count
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    -n|--count)
+      shift
+      if [ -n "${1:-}" ]; then
+        W11_COUNT="$1"
+        export W11_COUNT
+        shift
+      fi
+      ;;
+    *)
+      echo "[WARN] Unknown argument: $1"
+      shift
+      ;;
+  esac
+done
+
+# Basic logging helpers
+LOGFILE="$(pwd)/setup.log"
+log() { printf '%s %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*" | tee -a "$LOGFILE"; }
+log_info() { log "[INFO] $*"; }
+log_warn() { log "[WARN] $*"; }
+log_error() { log "[ERROR] $*"; }
+
+on_error() {
+  rc=$?
+  log_error "Script failed at line $1 (exit code $rc). Last command: '${BASH_COMMAND:-unknown}'"
+  log_error "See $LOGFILE for details. Exiting."
+  exit $rc
+}
+trap 'on_error $LINENO' ERR
+
+# Wrapper to run commands or print them in dry-run mode
+run_cmd() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log_info "[DRY-RUN] $*"
+  else
+    log_info "RUN: $*"
+    eval "$*"
+  fi
+}
+
+# Validate W11_COUNT is numeric and in a reasonable range
+validate_w11_count() {
+  if ! printf '%s' "$W11_COUNT" | grep -Eq '^[0-9]+$'; then
+    log_error "W11_COUNT must be a positive integer. Got: '$W11_COUNT'"
+    exit 2
+  fi
+  if [ "$W11_COUNT" -lt 1 ]; then
+    log_warn "W11_COUNT < 1; setting to 1"
+    W11_COUNT=1
+  fi
+  if [ "$W11_COUNT" -gt 20 ]; then
+    log_warn "W11_COUNT > 20; capping to 20"
+    W11_COUNT=20
+  fi
+  export W11_COUNT
+}
+
+# Preflight checks for disk and RAM
+preflight_checks() {
+  # Check disk (GB)
+  req_disk_gb=50
+  avail_gb=$(df --output=avail -BG . | tail -1 | tr -dc '0-9') || avail_gb=0
+  if [ -n "$avail_gb" ] && [ "$avail_gb" -lt "$req_disk_gb" ]; then
+    log_warn "Available disk (${avail_gb}GB) is less than recommended ${req_disk_gb}GB"
+  else
+    log_info "Disk check OK: ${avail_gb}GB available"
+  fi
+
+  # Check RAM (GB)
+  req_ram_gb=8
+  if [ -r /proc/meminfo ]; then
+    mem_kb=$(awk '/MemTotal:/ {print $2}' /proc/meminfo)
+    mem_gb=$(( mem_kb / 1024 / 1024 ))
+    if [ "$mem_gb" -lt "$req_ram_gb" ]; then
+      log_warn "System RAM (${mem_gb}GB) is less than recommended ${req_ram_gb}GB"
+    else
+      log_info "RAM check OK: ${mem_gb}GB available"
+    fi
+  else
+    log_warn "Unable to read /proc/meminfo to check RAM"
+  fi
+}
+
+validate_w11_count
+preflight_checks
 
 echo "================================================================="
 echo " Setting up 'credit union' lab in '$LAB_DIR' - Full code version."
@@ -41,29 +137,29 @@ else
   echo "[WARNING] Could not detect OS. Proceeding as if Ubuntu-like."
 fi
 
-echo "[*] Updating apt and installing apt-utils, curl, wget..."
-sudo apt-get update -y
-sudo apt-get install -y apt-utils curl wget
+log_info "Updating apt and ensuring apt-utils, curl, wget present..."
+run_cmd "sudo apt-get update -y"
+run_cmd "sudo apt-get install -y apt-utils curl wget"
 
 if ! command -v virtualbox &> /dev/null; then
-  echo "[!] Installing VirtualBox..."
-  sudo apt-get install -y virtualbox
+  log_warn "VirtualBox not found. Installing VirtualBox..."
+  run_cmd "sudo apt-get install -y virtualbox"
 else
-  echo "[*] VirtualBox already installed."
+  log_info "VirtualBox already installed."
 fi
 
 if ! command -v vagrant &> /dev/null; then
-  echo "[!] Installing Vagrant..."
-  sudo apt-get install -y vagrant
+  log_warn "Vagrant not found. Installing Vagrant..."
+  run_cmd "sudo apt-get install -y vagrant"
 else
-  echo "[*] Vagrant already installed."
+  log_info "Vagrant already installed."
 fi
 
 if ! command -v ansible &> /dev/null; then
-  echo "[!] Installing Ansible..."
-  sudo apt-get install -y ansible
+  log_warn "Ansible not found. Installing Ansible..."
+  run_cmd "sudo apt-get install -y ansible"
 else
-  echo "[*] Ansible already installed."
+  log_info "Ansible already installed."
 fi
 echo "========== (1/6) OS/Dependency Check Complete =========="
 
@@ -82,8 +178,8 @@ for box in "${REQUIRED_BOXES[@]}"; do
   if vagrant box list | grep -q "$box"; then
     echo "   - Found '$box'"
   else
-    echo "   - Box '$box' not found, adding..."
-    vagrant box add "$box" --provider virtualbox
+    log_info "   - Box '$box' not found, adding..."
+    run_cmd "vagrant box add '$box' --provider virtualbox"
   fi
 done
 echo "=== [2/6] Checking/Adding Vagrant Boxes (done) ==="
@@ -93,12 +189,12 @@ echo "=== [2/6] Checking/Adding Vagrant Boxes (done) ==="
 ###############################################################################
 echo "=== [3/6] Creating Lab Folder/Files (start) ==="
 if [ -d "$LAB_DIR" ]; then
-  echo "[!] '$LAB_DIR' already exists. Exiting to avoid overwriting."
+  log_error "'$LAB_DIR' already exists. Exiting to avoid overwriting."
   exit 1
 fi
 
 mkdir -p "$LAB_DIR"
-echo "[*] Created directory '$LAB_DIR'. Writing Vagrant and Ansible files..."
+log_info "Created directory '$LAB_DIR'. Writing Vagrant and Ansible files..."
 echo "=== [3/6] Creating Lab Folder/Files (done) ==="
 ###############################################################################
 # 4) Write Vagrantfile + Ansible structure + full PowerShell scripts
@@ -1113,22 +1209,22 @@ cd "$LAB_DIR"
 echo "[*] Now in $(pwd). Bringing up each VM in order..."
 
 echo "==> Starting dc01 (Domain Controller)..."
-vagrant up dc01
+run_cmd "vagrant up dc01"
 
 echo "==> Starting fs01 (File Server)..."
-vagrant up fs01
+run_cmd "vagrant up fs01"
 
 for i in $(seq 1 $W11_COUNT); do
   VM_NAME="w11-$(printf '%02d' $i)"
   echo "==> Starting $VM_NAME (Windows 11)..."
-  vagrant up "$VM_NAME"
+  run_cmd "vagrant up '$VM_NAME'"
 done
 
 echo "==> Starting w7-legacy (Windows 7)..."
-vagrant up w7-legacy
+run_cmd "vagrant up w7-legacy"
 
 echo "==> Starting web01 (Web Server)..."
-vagrant up web01
+run_cmd "vagrant up web01"
 echo "=== [5/6] Spinning up VMs in sequence (done) ==="
 #######################################
 # STAGE 6: COMPLETION
